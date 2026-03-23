@@ -365,7 +365,8 @@ class SunoApi {
     task?: string,
     continue_clip_id?: string,
     continue_at?: number,
-    persona_id?: string
+    persona_id?: string,
+    edited_clip_id?: string
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
     const payload: any = {
@@ -377,7 +378,8 @@ class SunoApi {
       continue_clip_id: continue_clip_id,
       task: task,
       token: await this.getCaptcha(),
-      ...(persona_id && { persona_id })
+      ...(persona_id && { persona_id }),
+      ...(edited_clip_id && { edited_clip_id })
     };
     if (isCustom) {
       payload.tags = tags;
@@ -512,6 +514,31 @@ class SunoApi {
     wait_audio?: boolean
   ): Promise<AudioInfo[]> {
     return this.generateSongs(prompt, true, tags, title, false, model, wait_audio, negative_tags, 'extend', audioId, continueAt);
+  }
+
+  /**
+   * Apply a vox persona to an existing clip.
+   * @param clipId The ID of the clip to apply the persona to.
+   * @param personaId The ID of the persona to apply.
+   * @param prompt Lyrics/prompt for the new vocal.
+   * @param tags Style tags.
+   * @param title Title.
+   * @param model Model version.
+   * @param wait_audio Whether to wait for audio.
+   */
+  public async applyVoxPersona(
+    clipId: string,
+    personaId: string,
+    prompt: string = '',
+    tags: string = '',
+    title: string = '',
+    model?: string,
+    wait_audio: boolean = false
+  ): Promise<AudioInfo[]> {
+    return this.generateSongs(
+      prompt, true, tags, title, false, model, wait_audio,
+      undefined, 'vox', undefined, undefined, personaId, clipId
+    );
   }
 
   /**
