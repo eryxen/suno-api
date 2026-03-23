@@ -287,14 +287,18 @@ class SunoApi {
       path: '/',
       sameSite: lax
     });
-    for (const key in this.cookies) {
-      cookies.push({
-        name: key,
-        value: this.cookies[key]+'',
-        domain: '.suno.com',
-        path: '/',
-        sameSite: lax
-      })
+    // Only set browser-safe cookies — __client is a large JWT that causes CDP setCookies errors
+    const browserSafeKeys = ['__client_uat', '__session_Jnxw-muT', 'ajs_anonymous_id'];
+    for (const key of browserSafeKeys) {
+      if (this.cookies[key]) {
+        cookies.push({
+          name: key,
+          value: this.cookies[key]+'',
+          domain: '.suno.com',
+          path: '/',
+          sameSite: lax
+        })
+      }
     }
     await context.addCookies(cookies);
     return context;
@@ -305,7 +309,9 @@ class SunoApi {
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
-    if (!await this.captchaRequired())
+    const required = await this.captchaRequired();
+    logger.info(`CAPTCHA required: ${required}`);
+    if (!required)
       return null;
 
     logger.info('CAPTCHA required. Launching browser...')
@@ -414,14 +420,17 @@ class SunoApi {
     return (new Promise((resolve, reject) => {
       page.route('**/api/generate/v2/**', async (route: any) => {
         try {
-          logger.info('hCaptcha token received. Closing browser');
+          const request = route.request();
+          const postData = request.postDataJSON();
+          logger.info(`hCaptcha token received (length: ${postData?.token?.length || 0}). Closing browser`);
+          logger.info(`Token preview: ${(postData?.token || '').substring(0, 80)}...`);
           route.abort();
           browser.browser()?.close();
           controller.abort();
-          const request = route.request();
           this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          resolve(request.postDataJSON().token);
+          resolve(postData.token);
         } catch(err) {
+          logger.error(`Error capturing captcha token: ${err}`);
           reject(err);
         }
       });
@@ -593,13 +602,20 @@ class SunoApi {
           2
         )
     );
-    const response = await this.client.post(
-      `${SunoApi.BASE_URL}/api/generate/v2/`,
-      payload,
-      {
-        timeout: 10000 // 10 seconds timeout
-      }
-    );
+    logger.info(`Sending generate request with token length: ${payload.token?.length || 0}, token null: ${payload.token === null}`);
+    let response;
+    try {
+      response = await this.client.post(
+        `${SunoApi.BASE_URL}/api/generate/v2/`,
+        payload,
+        {
+          timeout: 10000 // 10 seconds timeout
+        }
+      );
+    } catch (err: any) {
+      logger.error(`Generate request failed: ${err.response?.status} ${JSON.stringify(err.response?.data)}`);
+      throw err;
+    }
     if (response.status !== 200) {
       throw new Error('Error response:' + response.statusText);
     }
