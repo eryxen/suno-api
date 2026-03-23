@@ -1,16 +1,10 @@
 import axios, { AxiosInstance } from 'axios';
 import UserAgent from 'user-agents';
 import pino from 'pino';
-import yn from 'yn';
-import { isPage, sleep, waitForRequests } from '@/lib/utils';
+import { sleep } from '@/lib/utils';
 import * as cookie from 'cookie';
 import { randomUUID } from 'node:crypto';
 import { Solver } from '@2captcha/captcha-solver';
-import { paramsCoordinates } from '@2captcha/captcha-solver/dist/structs/2captcha';
-import { BrowserContext, Page, Locator, chromium, firefox } from 'rebrowser-playwright-core';
-import { createCursor, Cursor } from 'ghost-cursor-playwright';
-import { promises as fs } from 'fs';
-import path from 'node:path';
 
 // sunoApi instance caching
 const globalForSunoApi = global as unknown as { sunoApiCache?: Map<string, SunoApi> };
@@ -79,8 +73,6 @@ class SunoApi {
   private userAgent?: string;
   private cookies: Record<string, string | undefined>;
   private solver = new Solver(process.env.TWOCAPTCHA_KEY + '');
-  private ghostCursorEnabled = yn(process.env.BROWSER_GHOST_CURSOR, { default: false });
-  private cursor?: Cursor;
 
   constructor(cookies: string) {
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
@@ -212,100 +204,7 @@ class SunoApi {
   }
 
   /**
-   * Clicks on a locator or XY vector. This method is made because of the difference between ghost-cursor-playwright and Playwright methods
-   */
-  private async click(target: Locator|Page, position?: { x: number, y: number }): Promise<void> {
-    if (this.ghostCursorEnabled) {
-      let pos: any = isPage(target) ? { x: 0, y: 0 } : await target.boundingBox();
-      if (position) 
-        pos = {
-          ...pos,
-          x: pos.x + position.x,
-          y: pos.y + position.y,
-          width: null,
-          height: null,
-        };
-      return this.cursor?.actions.click({
-        target: pos
-      });
-    } else {
-      if (isPage(target))
-        return target.mouse.click(position?.x ?? 0, position?.y ?? 0);
-      else
-        return target.click({ force: true, position });
-    }
-  }
-
-  /**
-   * Get the BrowserType from the `BROWSER` environment variable.
-   * @returns {BrowserType} chromium, firefox or webkit. Default is chromium
-   */
-  private getBrowserType() {
-    const browser = process.env.BROWSER?.toLowerCase();
-    switch (browser) {
-      case 'firefox':
-        return firefox;
-      /*case 'webkit': ** doesn't work with rebrowser-patches
-      case 'safari':
-        return webkit;*/
-      default:
-        return chromium;
-    }
-  }
-
-  /**
-   * Launches a browser with the necessary cookies
-   * @returns {BrowserContext}
-   */
-  private async launchBrowser(): Promise<BrowserContext> {
-    const args = [
-      '--disable-blink-features=AutomationControlled',
-      '--disable-web-security',
-      '--no-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-features=site-per-process',
-      '--disable-features=IsolateOrigins',
-      '--disable-extensions',
-      '--disable-infobars'
-    ];
-    // Check for GPU acceleration, as it is recommended to turn it off for Docker
-    if (yn(process.env.BROWSER_DISABLE_GPU, { default: false }))
-      args.push('--enable-unsafe-swiftshader',
-        '--disable-gpu',
-        '--disable-setuid-sandbox');
-    const browser = await this.getBrowserType().launch({
-      args,
-      headless: yn(process.env.BROWSER_HEADLESS, { default: true })
-    });
-    const context = await browser.newContext({ userAgent: this.userAgent, locale: process.env.BROWSER_LOCALE, viewport: null });
-    const cookies = [];
-    const lax: 'Lax' | 'Strict' | 'None' = 'Lax';
-    cookies.push({
-      name: '__session',
-      value: this.currentToken+'',
-      domain: '.suno.com',
-      path: '/',
-      sameSite: lax
-    });
-    // Only set browser-safe cookies — __client is a large JWT that causes CDP setCookies errors
-    const browserSafeKeys = ['__client_uat', '__session_Jnxw-muT', 'ajs_anonymous_id'];
-    for (const key of browserSafeKeys) {
-      if (this.cookies[key]) {
-        cookies.push({
-          name: key,
-          value: this.cookies[key]+'',
-          domain: '.suno.com',
-          path: '/',
-          sameSite: lax
-        })
-      }
-    }
-    await context.addCookies(cookies);
-    return context;
-  }
-
-  /**
-   * Checks for CAPTCHA verification and solves the CAPTCHA if needed
+   * Checks for CAPTCHA verification and solves it via 2Captcha hCaptcha API (no browser needed).
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
@@ -314,138 +213,34 @@ class SunoApi {
     if (!required)
       return null;
 
-    logger.info('CAPTCHA required. Launching browser...')
-    const browser = await this.launchBrowser();
-    const page = await browser.newPage();
-    await page.goto('https://suno.com/create', { referer: 'https://www.google.com/', waitUntil: 'domcontentloaded', timeout: 0 });
+    const sitekey = process.env.HCAPTCHA_SITEKEY;
+    if (!sitekey) {
+      throw new Error(
+        'CAPTCHA is required but HCAPTCHA_SITEKEY env var is not set. ' +
+        'Get the sitekey from the hCaptcha widget on suno.com/create (data-sitekey attribute or k= param in iframe URL).'
+      );
+    }
 
-    logger.info('Waiting for Suno interface to load');
-    // await page.locator('.react-aria-GridList').waitFor({ timeout: 60000 });
-    await page.waitForResponse('**/api/project/**\\?**', { timeout: 60000 }); // wait for song list API call
+    logger.info('CAPTCHA required. Solving via 2Captcha hCaptcha API (no browser needed)...');
 
-    if (this.ghostCursorEnabled)
-      this.cursor = await createCursor(page);
-    
-    logger.info('Triggering the CAPTCHA');
-    try {
-      await page.getByLabel('Close').click({ timeout: 2000 }); // close all popups
-      // await this.click(page, { x: 318, y: 13 });
-    } catch(e) {}
-
-    const textarea = page.locator('.custom-textarea');
-    await this.click(textarea);
-    await textarea.pressSequentially('Lorem ipsum', { delay: 80 });
-
-    const button = page.locator('button[aria-label="Create"]').locator('div.flex');
-    this.click(button);
-
-    const controller = new AbortController();
-    new Promise<void>(async (resolve, reject) => {
-      const frame = page.frameLocator('iframe[title*="hCaptcha"]');
-      const challenge = frame.locator('.challenge-container');
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        let wait = true;
-        while (true) {
-          if (wait)
-            await waitForRequests(page, controller.signal);
-          const drag = (await challenge.locator('.prompt-text').first().innerText()).toLowerCase().includes('drag');
-          let captcha: any;
-          for (let j = 0; j < 3; j++) { // try several times because sometimes 2Captcha could return an error
-            try {
-              logger.info('Sending the CAPTCHA to 2Captcha');
-              const payload: paramsCoordinates = {
-                body: (await challenge.screenshot({ timeout: 5000 })).toString('base64'),
-                lang: process.env.BROWSER_LOCALE
-              };
-              if (drag) {
-                // Say to the worker that he needs to click
-                payload.textinstructions = 'CLICK on the shapes at their edge or center as shown above—please be precise!';
-                payload.imginstructions = (await fs.readFile(path.join(process.cwd(), 'public', 'drag-instructions.jpg'))).toString('base64');
-              }
-              captcha = await this.solver.coordinates(payload);
-              break;
-            } catch(err: any) {
-              logger.info(err.message);
-              if (j != 2)
-                logger.info('Retrying...');
-              else
-                throw err;
-            }
-          } 
-          if (drag) {
-            const challengeBox = await challenge.boundingBox();
-            if (challengeBox == null)
-              throw new Error('.challenge-container boundingBox is null!');
-            if (captcha.data.length % 2) {
-              logger.info('Solution does not have even amount of points required for dragging. Requesting new solution...');
-              this.solver.badReport(captcha.id);
-              wait = false;
-              continue;
-            }
-            for (let i = 0; i < captcha.data.length; i += 2) {
-              const data1 = captcha.data[i];
-              const data2 = captcha.data[i+1];
-              logger.info(JSON.stringify(data1) + JSON.stringify(data2));
-              await page.mouse.move(challengeBox.x + +data1.x, challengeBox.y + +data1.y);
-              await page.mouse.down();
-              await sleep(1.1); // wait for the piece to be 'unlocked'
-              await page.mouse.move(challengeBox.x + +data2.x, challengeBox.y + +data2.y, { steps: 30 });
-              await page.mouse.up();
-            }
-            wait = true;
-          } else {
-            for (const data of captcha.data) {
-              logger.info(data);
-              await this.click(challenge, { x: +data.x, y: +data.y });
-            };
-          }
-          this.click(frame.locator('.button-submit')).catch(e => {
-            if (e.message.includes('viewport')) // when hCaptcha window has been closed due to inactivity,
-              this.click(button); // click the Create button again to trigger the CAPTCHA
-            else
-              throw e;
-          });
-        }
-      } catch(e: any) {
-        if (e.message.includes('been closed') // catch error when closing the browser
-          || e.message == 'AbortError') // catch error when waitForRequests is aborted
-          resolve();
-        else
-          reject(e);
+        const result = await this.solver.hcaptcha({
+          sitekey,
+          pageurl: 'https://suno.com/create',
+          userAgent: this.userAgent
+        });
+        logger.info(`hCaptcha token received via 2Captcha (length: ${result.data?.length || 0}, attempt: ${attempt})`);
+        return result.data;
+      } catch (err: any) {
+        logger.error(`2Captcha hCaptcha solve attempt ${attempt} failed: ${err.message}`);
+        if (attempt === 3) throw err;
+        await sleep(2);
       }
-    }).catch(e => {
-      browser.browser()?.close();
-      throw e;
-    });
-    return (new Promise((resolve, reject) => {
-      page.route('**/api/generate/v2/**', async (route: any) => {
-        try {
-          const request = route.request();
-          const postData = request.postDataJSON();
-          logger.info(`hCaptcha token received (length: ${postData?.token?.length || 0}). Closing browser`);
-          logger.info(`Token preview: ${(postData?.token || '').substring(0, 80)}...`);
-          route.abort();
-          browser.browser()?.close();
-          controller.abort();
-          this.currentToken = request.headers().authorization.split('Bearer ').pop();
-          resolve(postData.token);
-        } catch(err) {
-          logger.error(`Error capturing captcha token: ${err}`);
-          reject(err);
-        }
-      });
-    }));
+    }
+    return null; // unreachable, but satisfies TS
   }
 
-  /**
-   * Imitates Cloudflare Turnstile loading error. Unused right now, left for future
-   */
-  private async getTurnstile() {
-    return this.client.post(
-      `https://clerk.suno.com/v1/client?__clerk_api_version=2021-02-05&_clerk_js_version=${SunoApi.CLERK_VERSION}&_method=PATCH`,
-      { captcha_error: '300030,300030,300030' },
-      { headers: { 'content-type': 'application/x-www-form-urlencoded' } });
-  }
 
   /**
    * Generate a song based on the prompt.
