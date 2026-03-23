@@ -4,7 +4,7 @@ import pino from 'pino';
 import { sleep } from '@/lib/utils';
 import * as cookie from 'cookie';
 import { randomUUID } from 'node:crypto';
-import { Solver } from '@2captcha/captcha-solver';
+// CapSolver API for hCaptcha solving
 
 // sunoApi instance caching
 const globalForSunoApi = global as unknown as { sunoApiCache?: Map<string, SunoApi> };
@@ -12,7 +12,7 @@ const cache = globalForSunoApi.sunoApiCache || new Map<string, SunoApi>();
 globalForSunoApi.sunoApiCache = cache;
 
 const logger = pino();
-export const DEFAULT_MODEL = 'chirp-v3-5';
+export const DEFAULT_MODEL = 'chirp-crow';
 
 export interface AudioInfo {
   id: string; // Unique identifier for the audio
@@ -72,7 +72,7 @@ class SunoApi {
   private deviceId?: string;
   private userAgent?: string;
   private cookies: Record<string, string | undefined>;
-  private solver = new Solver(process.env.TWOCAPTCHA_KEY + '');
+  private capsolverKey = process.env.CAPSOLVER_KEY || '';
 
   constructor(cookies: string) {
     this.userAgent = new UserAgent(/Macintosh/).random().toString(); // Usually Mac systems get less amount of CAPTCHAs
@@ -204,7 +204,7 @@ class SunoApi {
   }
 
   /**
-   * Checks for CAPTCHA verification and solves it via 2Captcha hCaptcha API (no browser needed).
+   * Checks for CAPTCHA verification and solves it via CapSolver hCaptcha API (no browser needed).
    * @returns {string|null} hCaptcha token. If no verification is required, returns null
    */
   public async getCaptcha(): Promise<string|null> {
@@ -221,19 +221,54 @@ class SunoApi {
       );
     }
 
-    logger.info('CAPTCHA required. Solving via 2Captcha hCaptcha API (no browser needed)...');
+    if (!this.capsolverKey) {
+      throw new Error('CAPTCHA is required but CAPSOLVER_KEY env var is not set.');
+    }
+
+    logger.info('CAPTCHA required. Solving via CapSolver hCaptcha API (no browser needed)...');
 
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const result = await this.solver.hcaptcha({
-          sitekey,
-          pageurl: 'https://suno.com/create',
-          userAgent: this.userAgent
+        // Create task
+        const createResp = await axios.post('https://api.capsolver.com/createTask', {
+          clientKey: this.capsolverKey,
+          task: {
+            type: 'HCaptchaTaskProxyLess',
+            websiteURL: 'https://suno.com/create',
+            websiteKey: sitekey,
+            userAgent: this.userAgent
+          }
         });
-        logger.info(`hCaptcha token received via 2Captcha (length: ${result.data?.length || 0}, attempt: ${attempt})`);
-        return result.data;
+
+        if (createResp.data.errorId !== 0) {
+          throw new Error(`CapSolver createTask error: ${createResp.data.errorDescription}`);
+        }
+
+        const taskId = createResp.data.taskId;
+        logger.info(`CapSolver task created: ${taskId}`);
+
+        // Poll for result (max 120s)
+        for (let i = 0; i < 40; i++) {
+          await sleep(3);
+          const resultResp = await axios.post('https://api.capsolver.com/getTaskResult', {
+            clientKey: this.capsolverKey,
+            taskId
+          });
+
+          if (resultResp.data.status === 'ready') {
+            const token = resultResp.data.solution?.gRecaptchaResponse;
+            logger.info(`hCaptcha token received via CapSolver (length: ${token?.length || 0}, attempt: ${attempt})`);
+            return token;
+          }
+
+          if (resultResp.data.errorId !== 0) {
+            throw new Error(`CapSolver getTaskResult error: ${resultResp.data.errorDescription}`);
+          }
+        }
+
+        throw new Error('CapSolver timeout: task not ready after 120s');
       } catch (err: any) {
-        logger.error(`2Captcha hCaptcha solve attempt ${attempt} failed: ${err.message}`);
+        logger.error(`CapSolver hCaptcha solve attempt ${attempt} failed: ${err.message}`);
         if (attempt === 3) throw err;
         await sleep(2);
       }
@@ -381,6 +416,9 @@ class SunoApi {
       ...(persona_id && { persona_id }),
       ...(edited_clip_id && { edited_clip_id })
     };
+    if (persona_id) {
+      payload.persona_id = persona_id;
+    }
     if (isCustom) {
       payload.tags = tags;
       payload.title = title;
@@ -511,9 +549,10 @@ class SunoApi {
     negative_tags: string = '',
     title: string = '',
     model?: string,
-    wait_audio?: boolean
+    wait_audio?: boolean,
+    persona_id?: string
   ): Promise<AudioInfo[]> {
-    return this.generateSongs(prompt, true, tags, title, false, model, wait_audio, negative_tags, 'extend', audioId, continueAt);
+    return this.generateSongs(prompt, true, tags, title, false, model, wait_audio, negative_tags, 'extend', audioId, continueAt, persona_id);
   }
 
   /**
