@@ -313,7 +313,8 @@ class SunoApi {
     make_instrumental: boolean = false,
     model?: string,
     wait_audio: boolean = false,
-    negative_tags?: string
+    negative_tags?: string,
+    persona_id?: string
   ): Promise<AudioInfo[]> {
     const startTime = Date.now();
     const audios = await this.generateSongs(
@@ -324,7 +325,11 @@ class SunoApi {
       make_instrumental,
       model,
       wait_audio,
-      negative_tags
+      negative_tags,
+      undefined,
+      undefined,
+      undefined,
+      persona_id
     );
     const costTime = Date.now() - startTime;
     logger.info(
@@ -359,7 +364,8 @@ class SunoApi {
     negative_tags?: string,
     task?: string,
     continue_clip_id?: string,
-    continue_at?: number
+    continue_at?: number,
+    persona_id?: string
   ): Promise<AudioInfo[]> {
     await this.keepAlive();
     const payload: any = {
@@ -370,7 +376,8 @@ class SunoApi {
       continue_at: continue_at,
       continue_clip_id: continue_clip_id,
       task: task,
-      token: await this.getCaptcha()
+      token: await this.getCaptcha(),
+      ...(persona_id && { persona_id })
     };
     if (isCustom) {
       payload.tags = tags;
